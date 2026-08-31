@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "defi-savings"
-version = "0.1.0"
-description = "On-chain yield layer: deposit USDC into Aave v3 via a Gnosis Safe treasury"
+version = "0.2.0"
+description = "On-chain yield layer: deposit USDC into Aave, Morpho, or any ERC-4626 vault"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-keywords = ["defi", "aave", "savings", "web3", "gnosis-safe", "fintech"]
+keywords = ["defi", "aave", "morpho", "erc4626", "savings", "web3", "gnosis-safe", "fintech"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -23,6 +23,7 @@ classifiers = [
 dependencies = [
     "web3>=7.0",
     "eth-account>=0.13",
+    "requests>=2.28",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +31,10 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
+
+[project.urls]
+Repository = "https://github.com/maxcabd/defi-savings"
+Issues     = "https://github.com/maxcabd/defi-savings/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/defi_savings"]
