@@ -1,0 +1,8 @@
+-- defi-savings no longer ships a database migration.
+--
+-- The library only handles on-chain interactions (deposit, withdraw, balance, APY).
+-- Storage of per-contributor shares, snapshots, and yield history is the
+-- application's responsibility.
+--
+-- If you need the proportional yield math, use distribute_yield() from the
+-- library and persist the AccountSnapshot data in your own schema.
