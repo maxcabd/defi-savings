@@ -50,6 +50,7 @@ Custom wallet — implement one interface::
 from .distribution import AccountSnapshot, distribute_yield
 from .providers.base import YieldProvider
 from .rates import RatePool, fetch_rates
+from .scoring import ScoredPool, score_pools
 from .signers.base import Call, Signer
 
 __all__ = [
@@ -60,6 +61,8 @@ __all__ = [
     "distribute_yield",
     "RatePool",
     "fetch_rates",
+    "ScoredPool",
+    "score_pools",
 ]
 
 try:
