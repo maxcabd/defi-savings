@@ -8,6 +8,7 @@ account.sign_transaction is wrapped (not replaced) so we can inspect the
 exact tx dict that was signed while still producing a real signed payload.
 """
 
+from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
@@ -152,3 +153,62 @@ def test_successful_execute_returns_last_tx_hash():
 
     assert tx_hash == ("cd" * 32)
     assert w3.eth.send_raw_transaction.call_count == 2
+
+
+# ── estimate_cost() -- pre-flight quotes, no signing or broadcast ───────────
+
+def test_estimate_cost_never_signs_or_broadcasts():
+    signer, w3, signed = _make_signer(gas_buffer=1.0, gas_floor=0)
+    w3.eth.estimate_gas.return_value = 100_000
+    w3.eth.fee_history.return_value = {"baseFeePerGas": [2_000_000_000]}
+    w3.to_wei.return_value = 1_000_000_000
+
+    estimate = signer.estimate_cost([approve_call()])
+
+    assert estimate.gas_limit == 100_000
+    assert estimate.max_fee_per_gas_wei == 5_000_000_000  # 2*2gwei + 1gwei
+    assert estimate.max_cost_wei == 100_000 * 5_000_000_000
+    assert estimate.max_cost_eth == Decimal(100_000 * 5_000_000_000) / Decimal(10**18)
+    assert signed == []
+    w3.eth.send_raw_transaction.assert_not_called()
+
+
+def test_estimate_cost_sums_sequential_calls():
+    signer, w3, signed = _make_signer(gas_buffer=1.0, gas_floor=0)
+    w3.eth.estimate_gas.side_effect = [40_000, 60_000]
+
+    estimate = signer.estimate_cost([approve_call(), deposit_call()])
+
+    assert estimate.gas_limit == 100_000
+
+
+def test_estimate_cost_applies_buffer_and_floor_per_call():
+    signer, w3, signed = _make_signer(gas_buffer=1.2, gas_floor=50_000)
+    # first call: 10_000*1.2=12_000 -> below floor -> 50_000
+    # second call: 100_000*1.2=120_000 -> above floor
+    w3.eth.estimate_gas.side_effect = [10_000, 100_000]
+
+    estimate = signer.estimate_cost([approve_call(), deposit_call()])
+
+    assert estimate.gas_limit == 50_000 + 120_000
+
+
+def test_estimate_cost_allowance_error_falls_back():
+    """Unlike execute() (sequential, real state), estimate_cost() simulates
+    every call against pre-batch state, so a later call depending on an
+    earlier one landing first hits the same allowance ambiguity
+    GnosisSafeSigner has -- must fall back, not raise."""
+    signer, w3, signed = _make_signer(gas_buffer=1.0, gas_floor=0, fallback_gas=999)
+    w3.eth.estimate_gas.side_effect = [10_000, Exception("insufficient allowance")]
+
+    estimate = signer.estimate_cost([approve_call(), deposit_call()])
+
+    assert estimate.gas_limit == 10_000 + 999
+
+
+def test_estimate_cost_genuine_revert_raises():
+    signer, w3, signed = _make_signer()
+    w3.eth.estimate_gas.side_effect = Exception("execution reverted: bad amount")
+
+    with pytest.raises(RuntimeError, match="would revert"):
+        signer.estimate_cost([approve_call()])

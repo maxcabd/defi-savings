@@ -9,7 +9,7 @@ from decimal import Decimal
 
 from web3 import Web3
 
-from ..signers.base import Call, Signer
+from ..signers.base import Call, GasEstimate, Signer
 from .base import YieldProvider
 
 USDC_ADDRESS      = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
@@ -105,18 +105,8 @@ class AaveProvider(YieldProvider):
         raw         = atoken.functions.balanceOf(self._signer.address).call()
         return Decimal(raw) / Decimal(10 ** USDC_DECIMALS)
 
-    def deposit(self, amount_usdc: Decimal) -> str:
-        """Approve Aave Pool then supply USDC — delegated to the signer."""
-        amount_raw = int(amount_usdc * 10 ** USDC_DECIMALS)
-
-        bal = self.usdc.functions.balanceOf(self._signer.address).call()
-        if bal < amount_raw:
-            have = Decimal(bal) / Decimal(10 ** USDC_DECIMALS)
-            raise RuntimeError(
-                f"USDC balance too low: have ${have:.2f}, need ${amount_usdc:.2f}."
-            )
-
-        return self._signer.execute([
+    def _deposit_calls(self, amount_raw: int) -> list[Call]:
+        return [
             Call(
                 to   = USDC_ADDRESS,
                 data = self.usdc.encode_abi("approve", [AAVE_POOL_ADDRESS, amount_raw]),
@@ -125,14 +115,46 @@ class AaveProvider(YieldProvider):
                 to   = AAVE_POOL_ADDRESS,
                 data = self.pool.encode_abi("supply", [USDC_ADDRESS, amount_raw, self._signer.address, 0]),
             ),
-        ])
+        ]
 
-    def withdraw(self, amount_usdc: Decimal) -> str:
-        """Withdraw USDC from Aave back to the signer's address."""
-        amount_raw = int(amount_usdc * 10 ** USDC_DECIMALS)
-        return self._signer.execute([
+    def _withdraw_calls(self, amount_raw: int) -> list[Call]:
+        return [
             Call(
                 to   = AAVE_POOL_ADDRESS,
                 data = self.pool.encode_abi("withdraw", [USDC_ADDRESS, amount_raw, self._signer.address]),
             ),
-        ])
+        ]
+
+    def _check_deposit_balance(self, amount_usdc: Decimal) -> int:
+        amount_raw = int(amount_usdc * 10 ** USDC_DECIMALS)
+        bal = self.usdc.functions.balanceOf(self._signer.address).call()
+        if bal < amount_raw:
+            have = Decimal(bal) / Decimal(10 ** USDC_DECIMALS)
+            raise RuntimeError(
+                f"USDC balance too low: have ${have:.2f}, need ${amount_usdc:.2f}."
+            )
+        return amount_raw
+
+    def deposit(self, amount_usdc: Decimal) -> str:
+        """Approve Aave Pool then supply USDC — delegated to the signer."""
+        amount_raw = self._check_deposit_balance(amount_usdc)
+        return self._signer.execute(self._deposit_calls(amount_raw))
+
+    def withdraw(self, amount_usdc: Decimal) -> str:
+        """Withdraw USDC from Aave back to the signer's address."""
+        amount_raw = int(amount_usdc * 10 ** USDC_DECIMALS)
+        return self._signer.execute(self._withdraw_calls(amount_raw))
+
+    def estimate_deposit_cost(self, amount_usdc: Decimal) -> GasEstimate:
+        """Quote the ETH cost of depositing ``amount_usdc``, without depositing.
+        Raises ``NotImplementedError`` if the signer doesn't support cost
+        estimation (see ``Signer.estimate_cost``'s docstring)."""
+        amount_raw = self._check_deposit_balance(amount_usdc)
+        return self._signer.estimate_cost(self._deposit_calls(amount_raw))
+
+    def estimate_withdraw_cost(self, amount_usdc: Decimal) -> GasEstimate:
+        """Quote the ETH cost of withdrawing ``amount_usdc``, without withdrawing.
+        Raises ``NotImplementedError`` if the signer doesn't support cost
+        estimation (see ``Signer.estimate_cost``'s docstring)."""
+        amount_raw = int(amount_usdc * 10 ** USDC_DECIMALS)
+        return self._signer.estimate_cost(self._withdraw_calls(amount_raw))

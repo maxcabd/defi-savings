@@ -51,7 +51,7 @@ from decimal import Decimal
 from web3 import Web3
 
 from ..errors import VaultDepositCapExceededError
-from ..signers.base import Call, Signer
+from ..signers.base import Call, GasEstimate, Signer
 from .base import YieldProvider
 
 # USDC on Base — default asset
@@ -214,6 +214,49 @@ class Erc4626Provider(YieldProvider):
             return Decimal(0)
         return self._apy_fn()
 
+    def _deposit_calls(self, amount_raw: int) -> list[Call]:
+        return [
+            Call(
+                to   = self._asset_addr,
+                data = self.asset.encode_abi("approve", [self._vault_addr, amount_raw]),
+            ),
+            Call(
+                to   = self._vault_addr,
+                data = self.vault.encode_abi("deposit", [amount_raw, self._signer.address]),
+            ),
+        ]
+
+    def _withdraw_calls(self, amount_raw: int) -> list[Call]:
+        return [
+            Call(
+                to   = self._vault_addr,
+                data = self.vault.encode_abi(
+                    "withdraw",
+                    [amount_raw, self._signer.address, self._signer.address],
+                ),
+            ),
+        ]
+
+    def _check_deposit_preconditions(self, amount: Decimal) -> int:
+        """Balance + maxDeposit checks shared by deposit() and
+        estimate_deposit_cost(). Returns amount in raw asset units."""
+        amount_raw = int(amount * 10 ** self._asset_decimals)
+
+        bal = self.asset.functions.balanceOf(self._signer.address).call()
+        if bal < amount_raw:
+            have = Decimal(bal) / Decimal(10 ** self._asset_decimals)
+            raise RuntimeError(
+                f"Asset balance too low: have {have:.6f}, need {amount:.6f}."
+            )
+
+        max_dep_raw = self.vault.functions.maxDeposit(self._signer.address).call()
+        if amount_raw > max_dep_raw:
+            max_dep = Decimal(max_dep_raw) / Decimal(10 ** self._asset_decimals)
+            raise VaultDepositCapExceededError(
+                requested=amount, max_deposit=max_dep, vault_address=self._vault_addr,
+            )
+        return amount_raw
+
     def deposit(self, amount: Decimal) -> str:
         """Approve the vault then deposit assets — two calls in one Safe tx.
 
@@ -236,32 +279,8 @@ class Erc4626Provider(YieldProvider):
             VaultDepositCapExceededError: If the vault's maxDeposit() for the
                           signer's address is below the requested amount.
         """
-        amount_raw = int(amount * 10 ** self._asset_decimals)
-
-        bal = self.asset.functions.balanceOf(self._signer.address).call()
-        if bal < amount_raw:
-            have = Decimal(bal) / Decimal(10 ** self._asset_decimals)
-            raise RuntimeError(
-                f"Asset balance too low: have {have:.6f}, need {amount:.6f}."
-            )
-
-        max_dep_raw = self.vault.functions.maxDeposit(self._signer.address).call()
-        if amount_raw > max_dep_raw:
-            max_dep = Decimal(max_dep_raw) / Decimal(10 ** self._asset_decimals)
-            raise VaultDepositCapExceededError(
-                requested=amount, max_deposit=max_dep, vault_address=self._vault_addr,
-            )
-
-        return self._signer.execute([
-            Call(
-                to   = self._asset_addr,
-                data = self.asset.encode_abi("approve", [self._vault_addr, amount_raw]),
-            ),
-            Call(
-                to   = self._vault_addr,
-                data = self.vault.encode_abi("deposit", [amount_raw, self._signer.address]),
-            ),
-        ])
+        amount_raw = self._check_deposit_preconditions(amount)
+        return self._signer.execute(self._deposit_calls(amount_raw))
 
     def withdraw(self, amount: Decimal) -> str:
         """Withdraw an exact asset amount from the vault to the signer's address.
@@ -276,12 +295,28 @@ class Erc4626Provider(YieldProvider):
             Transaction hash of the confirmed withdrawal.
         """
         amount_raw = int(amount * 10 ** self._asset_decimals)
-        return self._signer.execute([
-            Call(
-                to   = self._vault_addr,
-                data = self.vault.encode_abi(
-                    "withdraw",
-                    [amount_raw, self._signer.address, self._signer.address],
-                ),
-            ),
-        ])
+        return self._signer.execute(self._withdraw_calls(amount_raw))
+
+    def estimate_deposit_cost(self, amount: Decimal) -> GasEstimate:
+        """Quote the ETH cost of depositing ``amount``, without depositing.
+
+        Runs the same balance/maxDeposit checks as :meth:`deposit` (so a
+        cap that would block the real deposit raises here too, before you
+        spend anything finding out) then delegates to the signer's own
+        :meth:`~defi_savings.signers.base.Signer.estimate_cost`. Raises
+        ``NotImplementedError`` if the signer doesn't support cost
+        estimation (see that method's docstring).
+        """
+        amount_raw = self._check_deposit_preconditions(amount)
+        return self._signer.estimate_cost(self._deposit_calls(amount_raw))
+
+    def estimate_withdraw_cost(self, amount: Decimal) -> GasEstimate:
+        """Quote the ETH cost of withdrawing ``amount``, without withdrawing.
+
+        Delegates to the signer's own
+        :meth:`~defi_savings.signers.base.Signer.estimate_cost`. Raises
+        ``NotImplementedError`` if the signer doesn't support cost
+        estimation (see that method's docstring).
+        """
+        amount_raw = int(amount * 10 ** self._asset_decimals)
+        return self._signer.estimate_cost(self._withdraw_calls(amount_raw))

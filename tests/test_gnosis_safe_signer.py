@@ -8,6 +8,7 @@ signing code runs for real against dummy deterministic private keys — no
 crypto is mocked, only the network layer.
 """
 
+from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
@@ -243,3 +244,62 @@ def test_multi_call_routes_through_multisend():
     exec_to, operation = tx_hash_call_args[0], tx_hash_call_args[3]
     assert exec_to == Web3.to_checksum_address(MULTISEND_ADDR)
     assert operation == 1  # DELEGATECALL
+
+
+# ── estimate_cost() -- pre-flight quotes, no signing or broadcast ───────────
+
+def test_estimate_cost_never_touches_signing_or_broadcast():
+    signer, w3 = _make_signer(gas_buffer=1.0, safe_overhead=0, gas_floor=0)
+    w3.eth.estimate_gas.return_value = 100_000
+    w3.eth.fee_history.return_value = {"baseFeePerGas": [2_000_000_000]}
+    w3.to_wei.return_value = 1_000_000_000  # 1 gwei priority fee
+
+    estimate = signer.estimate_cost([approve_call()])
+
+    # base_fee=2gwei -> max_fee = 2*2gwei + 1gwei = 5gwei; gas_limit=100_000
+    assert estimate.gas_limit == 100_000
+    assert estimate.max_fee_per_gas_wei == 5_000_000_000
+    assert estimate.max_cost_wei == 100_000 * 5_000_000_000
+    assert estimate.max_cost_eth == Decimal(100_000 * 5_000_000_000) / Decimal(10**18)
+    w3.eth.contract.return_value.functions.execTransaction.assert_not_called()
+    w3.eth.send_raw_transaction.assert_not_called()
+    w3.eth.get_transaction_count.assert_not_called()
+
+
+def test_estimate_cost_matches_execute_gas_limit_math():
+    """estimate_cost() and execute() must compute the identical gas_limit
+    for the same calls -- same buffer/overhead/floor formula."""
+    signer, w3 = _make_signer(gas_buffer=1.4, safe_overhead=200_000, gas_floor=300_000)
+    w3.eth.estimate_gas.return_value = 500_000
+
+    estimate = signer.estimate_cost([approve_call()])
+    signer.execute([approve_call()])
+
+    executed_gas = w3.eth.contract.return_value.functions.execTransaction.return_value.build_transaction.call_args[0][0]["gas"]
+    assert estimate.gas_limit == executed_gas == int(500_000 * 1.4) + 200_000
+
+
+def test_estimate_cost_multi_call_sums_like_execute():
+    signer, w3 = _make_signer(gas_buffer=1.0, safe_overhead=0, gas_floor=0)
+    w3.eth.estimate_gas.side_effect = [40_000, 60_000]
+
+    estimate = signer.estimate_cost([approve_call(), deposit_call()])
+
+    assert estimate.gas_limit == 100_000
+
+
+def test_estimate_cost_allowance_fallback_same_as_execute():
+    signer, w3 = _make_signer(gas_buffer=1.0, safe_overhead=0, gas_floor=0, fallback_call_gas=777)
+    w3.eth.estimate_gas.side_effect = [10_000, Exception("insufficient allowance")]
+
+    estimate = signer.estimate_cost([approve_call(), deposit_call()])
+
+    assert estimate.gas_limit == 10_000 + 777
+
+
+def test_estimate_cost_genuine_revert_raises():
+    signer, w3 = _make_signer()
+    w3.eth.estimate_gas.side_effect = Exception("execution reverted: Pausable: paused")
+
+    with pytest.raises(RuntimeError, match="would revert"):
+        signer.estimate_cost([approve_call()])

@@ -52,18 +52,23 @@ from .errors import VaultDepositCapExceededError
 from .providers.base import YieldProvider
 from .rates import RatePool, fetch_rates
 from .scoring import ScoredPool, score_pools
-from .signers.base import Call, Signer
+from .signers.base import Call, GasEstimate, Signer
+from .stability import StabilityScore, fetch_stability, fetch_stability_scores
 
 __all__ = [
     "YieldProvider",
     "Signer",
     "Call",
+    "GasEstimate",
     "AccountSnapshot",
     "distribute_yield",
     "RatePool",
     "fetch_rates",
     "ScoredPool",
     "score_pools",
+    "StabilityScore",
+    "fetch_stability",
+    "fetch_stability_scores",
     "VaultDepositCapExceededError",
 ]
 

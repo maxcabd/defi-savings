@@ -14,12 +14,13 @@ library — signing is done directly with eth_account and the Safe's own
 
 import logging
 import threading
+from decimal import Decimal
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from web3 import Web3
 
-from .base import Call, Signer
+from .base import Call, GasEstimate, Signer
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +230,28 @@ class GnosisSafeSigner(Signer):
                     raise RuntimeError(f"Inner call to {call.to} would revert: {exc}") from exc
         return total
 
+    def _current_fee(self) -> tuple[int, int, int]:
+        """Return (base_fee, max_priority_fee, max_fee_per_gas) at this moment,
+        in wei. Shared by execute() (fetched fresh right before signing) and
+        estimate_cost() (a point-in-time quote)."""
+        fee_hist = self._w3.eth.fee_history(1, "latest", [50])
+        base_fee = fee_hist["baseFeePerGas"][-1]
+        max_prio = self._w3.to_wei(1, "gwei")
+        max_fee  = base_fee * 2 + max_prio
+        return base_fee, max_prio, max_fee
+
+    def estimate_cost(self, calls: list[Call]) -> GasEstimate:
+        inner_gas = self._estimate_inner_gas(calls)
+        gas_limit = max(int(inner_gas * self._gas_buffer) + self._safe_overhead, self._gas_floor)
+        _, _, max_fee = self._current_fee()
+        max_cost_wei = gas_limit * max_fee
+        return GasEstimate(
+            gas_limit           = gas_limit,
+            max_fee_per_gas_wei = max_fee,
+            max_cost_wei        = max_cost_wei,
+            max_cost_eth        = Decimal(max_cost_wei) / Decimal(10 ** 18),
+        )
+
     def execute(self, calls: list[Call]) -> str:
         # Estimate gas before acquiring the lock — read-only, no nonce impact.
         inner_gas = self._estimate_inner_gas(calls)
@@ -274,11 +297,8 @@ class GnosisSafeSigner(Signer):
                     + bytes([sig.v + 4])   # +4 → v=31/32 signals eth_sign to the Safe
                 )
 
-            nonce    = self._w3.eth.get_transaction_count(signer1.address, "pending")
-            fee_hist = self._w3.eth.fee_history(1, "latest", [50])
-            base_fee = fee_hist["baseFeePerGas"][-1]
-            max_prio = self._w3.to_wei(1, "gwei")
-            max_fee  = base_fee * 2 + max_prio
+            nonce = self._w3.eth.get_transaction_count(signer1.address, "pending")
+            _, max_prio, max_fee = self._current_fee()
 
             exec_tx = safe.functions.execTransaction(
                 exec_to, 0, exec_data, operation,

@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from defi_savings import Call, Erc4626Provider, VaultDepositCapExceededError
+from defi_savings import Call, Erc4626Provider, GasEstimate, VaultDepositCapExceededError
 
 VAULT_ADDRESS = "0x3333333333333333333333333333333333333333"
 SIGNER_ADDR   = "0x4444444444444444444444444444444444444444"
@@ -25,7 +25,14 @@ class FakeSigner:
     def __init__(self, w3):
         self._w3 = w3
         self.executed_calls: list[Call] = []
+        self.estimated_calls: list[Call] = []
         self.execute_return = "0x" + "cd" * 32
+        self.estimate_return = GasEstimate(
+            gas_limit=123_456,
+            max_fee_per_gas_wei=1_000_000_000,
+            max_cost_wei=123_456_000_000_000,
+            max_cost_eth=Decimal("0.000123456"),
+        )
 
     @property
     def address(self) -> str:
@@ -38,6 +45,10 @@ class FakeSigner:
     def execute(self, calls: list[Call]) -> str:
         self.executed_calls.append(calls)
         return self.execute_return
+
+    def estimate_cost(self, calls: list[Call]) -> GasEstimate:
+        self.estimated_calls.append(calls)
+        return self.estimate_return
 
 
 def _make_provider(*, balance_raw: int, max_deposit_raw: int) -> tuple[Erc4626Provider, FakeSigner]:
@@ -129,3 +140,47 @@ def test_insufficient_balance_raises_before_checking_cap():
         provider.deposit(Decimal("1000"))
 
     assert signer.executed_calls == []
+
+
+# ── estimate_deposit_cost() / estimate_withdraw_cost() ──────────────────────
+
+def test_estimate_deposit_cost_delegates_to_signer_without_executing():
+    provider, signer = _make_provider(balance_raw=2_000_000_000, max_deposit_raw=5_000_000_000)
+
+    estimate = provider.estimate_deposit_cost(Decimal("1000"))
+
+    assert estimate is signer.estimate_return
+    assert signer.executed_calls == []          # never actually deposited
+    assert len(signer.estimated_calls) == 1
+    assert len(signer.estimated_calls[0]) == 2   # same approve+deposit pair as deposit()
+
+
+def test_estimate_deposit_cost_still_enforces_cap_check():
+    """The maxDeposit() check runs before quoting, same as before depositing --
+    no point pricing out a deposit that would revert anyway."""
+    provider, signer = _make_provider(balance_raw=2_000_000_000, max_deposit_raw=0)
+
+    with pytest.raises(VaultDepositCapExceededError):
+        provider.estimate_deposit_cost(Decimal("1000"))
+
+    assert signer.estimated_calls == []
+
+
+def test_estimate_deposit_cost_still_enforces_balance_check():
+    provider, signer = _make_provider(balance_raw=100_000_000, max_deposit_raw=5_000_000_000)
+
+    with pytest.raises(RuntimeError, match="balance too low"):
+        provider.estimate_deposit_cost(Decimal("1000"))
+
+    assert signer.estimated_calls == []
+
+
+def test_estimate_withdraw_cost_delegates_to_signer_without_executing():
+    provider, signer = _make_provider(balance_raw=2_000_000_000, max_deposit_raw=5_000_000_000)
+
+    estimate = provider.estimate_withdraw_cost(Decimal("500"))
+
+    assert estimate is signer.estimate_return
+    assert signer.executed_calls == []
+    assert len(signer.estimated_calls) == 1
+    assert len(signer.estimated_calls[0]) == 1   # single withdraw call, no cap/balance check

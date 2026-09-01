@@ -51,6 +51,37 @@ high_yield = [p for p in pools if p.apy >= 5]
 
 ---
 
+## Check rate stability before committing
+
+A pool's spot APY is a single snapshot — it tells you nothing about whether that rate is a boring, reliable baseline or a number that happens to be having a good day. A thin pool can read higher than a deep one while actually swinging 3-8% week to week, which matters a lot for a savings product where users expect a predictable rate, not a lottery.
+
+```python
+from defi_savings.rates import fetch_rates
+from defi_savings.stability import fetch_stability_scores
+
+pools = fetch_rates("Base", "USDC")
+stability = fetch_stability_scores([p.pool_id for p in pools[:5]])
+
+for p in pools[:5]:
+    s = stability.get(p.pool_id)
+    if s:
+        print(f"{p.project:20s} apy={p.apy:5.2f}%  30d mean={s.mean_apy:5.2f}%  "
+              f"cv={s.coefficient_of_variation:.3f}  range=[{s.min_apy:.2f}, {s.max_apy:.2f}]")
+```
+
+`coefficient_of_variation` (stdev ÷ mean) is what makes pools at different rate levels comparable — a pool averaging 20% with a stdev of 2 is not "more stable" than one averaging 4% with a stdev of 1 just because its raw stdev is bigger; relative to its own rate, the second pool is actually far more volatile (CV 0.25 vs 0.10). **Lower CV = more stable.**
+
+```python
+from defi_savings.stability import fetch_stability
+
+s = fetch_stability("e0672197-9f3e-4414-bca5-e6b4c90aa469", days=30)
+# StabilityScore(samples=30, mean_apy=4.40, stdev_apy=0.35, coefficient_of_variation=0.08, ...)
+```
+
+Feed this straight into `score_pools` (below) to rank pools with stability as a first-class factor, not an afterthought.
+
+---
+
 ## Plug into any ERC-4626 vault
 
 Most modern DeFi protocols (Morpho MetaMorpho, Compound v3, Euler, etc.) expose an ERC-4626 interface. Use `Erc4626Provider` to connect to any of them in 5 lines — no protocol-specific boilerplate:
@@ -129,6 +160,24 @@ except VaultDepositCapExceededError as exc:
     # another provider -- retrying the same deposit won't help until the
     # cap changes.
 ```
+
+### Estimate cost before you commit
+
+`deposit()`/`withdraw()` tell you what a transfer cost *after* it happens. `estimate_deposit_cost()`/`estimate_withdraw_cost()` quote it beforehand — same balance/cap checks, same gas-estimation logic as the real call, but nothing is signed or broadcast:
+
+```python
+estimate = provider.estimate_deposit_cost(Decimal("1000"))
+print(f"up to {estimate.max_cost_eth} ETH (gas_limit={estimate.gas_limit})")
+
+if estimate.max_cost_eth > Decimal("0.002"):
+    print("skipping -- not worth it right now")
+else:
+    provider.deposit(Decimal("1000"))
+```
+
+`max_cost_eth` is a worst-case figure (`gas_limit × current max fee per gas`) — the real cost of a successful transaction is usually well below it, since `gas_limit` already includes the signer's own safety buffer over the estimated gas. Treat it as "what this could cost", not "what it will cost". Log it alongside the receipt's actual `gasUsed` after the real call to build a picture of how tight your buffer actually is over time.
+
+Works with any provider built on `Erc4626Provider` or `AaveProvider`. Raises `NotImplementedError` if the underlying `Signer` doesn't support `estimate_cost()` — both built-in signers (`GnosisSafeSigner`, `EOASigner`) do.
 
 ---
 
@@ -275,6 +324,37 @@ distributions = distribute_yield(snapshots, provider.position_balance())
 ```
 
 After crediting each user, set `last_snapshot = balance + yield_amt` so the next run only measures new growth.
+
+---
+
+## Rank pools by score
+
+`fetch_rates` sorts by spot APY alone. `score_pools` ranks by a weighted composite of APY, 30-day rate stability, deposit gas cost, and TVL — so the pool that wins isn't just whichever one happens to read highest today.
+
+```python
+from defi_savings.rates import fetch_rates
+from defi_savings.stability import fetch_stability_scores
+from defi_savings.scoring import score_pools
+
+pools = fetch_rates("Base", "USDC")
+stability = fetch_stability_scores([p.pool_id for p in pools])
+
+ranked = score_pools(
+    pools,
+    gas_cost_usd={"morpho-blue": 0.12, "aave-v3": 0.05, "compound-v3": 0.03},
+    stability=stability,
+)
+for s in ranked[:5]:
+    print(f"{s.pool.project:20s} score={s.score:.3f}  apy={s.pool.apy:.2f}%  "
+          f"cv={s.stability_cv}  gas=${s.gas_cost_usd:.4f}")
+```
+
+Default weights: **APY 35%, stability 30%, gas 20%, TVL 15%.** Stability is weighted nearly as high as raw APY on purpose — a pool whose rate swings 3-8% is a worse fit for a savings product than one that sits at a boring, predictable 4.3%, even though the volatile one's spot APY often reads higher. Override with `weights={"apy": ..., "stability": ..., "gas": ..., "tvl": ...}` (auto-normalised to sum to 1; a `0` weight fully disables a dimension).
+
+Two dimensions default differently for missing data, on purpose:
+
+- **Gas** — a pool absent from `gas_cost_usd` scores as *free* (best case). You may just not have written that provider's cost estimate yet; don't penalise it for that.
+- **Stability** — a pool absent from `stability` (or fetch failed) scores as the *worst* pool in the set (highest CV). The whole point of this dimension is risk awareness — rewarding "we don't know" with a good score defeats it.
 
 ---
 

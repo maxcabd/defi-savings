@@ -17,11 +17,12 @@ nonce ordering is correct. If you need single-tx batching, use
 
 import logging
 import threading
+from decimal import Decimal
 
 from eth_account import Account
 from web3 import Web3
 
-from .base import Call, Signer
+from .base import Call, GasEstimate, Signer
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,15 @@ class EOASigner(Signer):
     # Prevents concurrent nonce fetch/submit races from the same key.
     _tx_lock: threading.Lock = threading.Lock()
 
+    # Substrings (matched case-insensitively) identifying an ERC-20 allowance
+    # revert during estimate_cost()'s pre-flight simulation — see that
+    # method's docstring for why this fallback is needed here but not in
+    # execute() itself.
+    _ALLOWANCE_ERRORS = (
+        "transfer amount exceeds allowance",
+        "insufficient allowance",
+    )
+
     def __init__(
         self,
         private_key: str,
@@ -76,6 +86,59 @@ class EOASigner(Signer):
     def w3(self) -> Web3:
         return self._w3
 
+    def _current_fee(self) -> tuple[int, int, int]:
+        """Return (base_fee, max_priority_fee, max_fee_per_gas) at this
+        moment, in wei."""
+        fee_hist = self._w3.eth.fee_history(1, "latest", [50])
+        base_fee = fee_hist["baseFeePerGas"][-1]
+        max_prio = self._w3.to_wei(1, "gwei")
+        max_fee  = base_fee * 2 + max_prio
+        return base_fee, max_prio, max_fee
+
+    def estimate_cost(self, calls: list[Call]) -> GasEstimate:
+        """Pre-flight quote for the whole sequence, as if executed right now.
+
+        Unlike execute() itself, this can't rely on an earlier call in the
+        sequence having already landed on-chain — none of them have
+        executed yet — so a call whose simulation fails with what looks
+        like an allowance error (e.g. deposit() depending on the approve()
+        before it) falls back to fallback_gas instead of raising, the same
+        state-dependency accommodation GnosisSafeSigner needs for its
+        batched calls. Any other simulated revert raises immediately.
+        """
+        total_gas = 0
+        for call in calls:
+            to = Web3.to_checksum_address(call.to)
+            try:
+                est = self._w3.eth.estimate_gas({
+                    "from":  self._account.address,
+                    "to":    to,
+                    "data":  call.data,
+                    "value": call.value,
+                })
+                total_gas += max(int(est * self._gas_buffer), self._gas_floor)
+            except Exception as exc:
+                err = str(exc).lower()
+                if any(msg in err for msg in self._ALLOWANCE_ERRORS):
+                    logger.warning(
+                        "Call to %s could not be estimated standalone "
+                        "(allowance not yet set at simulation time) — using "
+                        "fallback_gas=%d",
+                        to, self._fallback_gas,
+                    )
+                    total_gas += self._fallback_gas
+                else:
+                    raise RuntimeError(f"Call to {to} would revert: {exc}") from exc
+
+        _, _, max_fee = self._current_fee()
+        max_cost_wei = total_gas * max_fee
+        return GasEstimate(
+            gas_limit           = total_gas,
+            max_fee_per_gas_wei = max_fee,
+            max_cost_wei        = max_cost_wei,
+            max_cost_eth        = Decimal(max_cost_wei) / Decimal(10 ** 18),
+        )
+
     def execute(self, calls: list[Call]) -> str:
         last_hash = ""
         with self._tx_lock:
@@ -96,11 +159,8 @@ class EOASigner(Signer):
                     )
                     gas_limit = self._fallback_gas
 
-                nonce    = self._w3.eth.get_transaction_count(self._account.address, "pending")
-                fee_hist = self._w3.eth.fee_history(1, "latest", [50])
-                base_fee = fee_hist["baseFeePerGas"][-1]
-                max_prio = self._w3.to_wei(1, "gwei")
-                max_fee  = base_fee * 2 + max_prio
+                nonce = self._w3.eth.get_transaction_count(self._account.address, "pending")
+                _, max_prio, max_fee = self._current_fee()
 
                 raw_tx = {
                     "from":                 self._account.address,
