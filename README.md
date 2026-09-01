@@ -113,6 +113,23 @@ provider = Erc4626Provider(
 )
 ```
 
+### Vault not accepting deposits
+
+`ERC4626.deposit()` checks `maxDeposit(receiver)` before anything else — before allowance, before balance. A curator can empty a vault's supply queue or zero its cap at any time, and every deposit will revert on-chain regardless of gas until it changes. `Erc4626Provider.deposit()` checks this up front and raises a typed error instead of burning gas on a guaranteed revert:
+
+```python
+from defi_savings import VaultDepositCapExceededError
+
+try:
+    provider.deposit(Decimal("1000"))
+except VaultDepositCapExceededError as exc:
+    # exc.requested, exc.max_deposit, exc.vault_address
+    print(f"Vault paused: cap is {exc.max_deposit}, wanted {exc.requested}")
+    # show a clear "temporarily unavailable" message, or fall back to
+    # another provider -- retrying the same deposit won't help until the
+    # cap changes.
+```
+
 ---
 
 ## Aave v3 (built-in)
@@ -143,6 +160,18 @@ from defi_savings import EOASigner
 signer = EOASigner(private_key="0x...", rpc_url="https://mainnet.base.org")
 ```
 
+Gas is estimated per call via `eth_estimateGas` (with a configurable buffer and floor) rather than using a fixed limit — calls run sequentially and are waited on before the next is built, so each estimate is against real, already-updated state:
+
+```python
+signer = EOASigner(
+    private_key="0x...",
+    rpc_url="https://mainnet.base.org",
+    gas_buffer=1.2,      # 20% headroom over the estimate (default)
+    gas_floor=100_000,   # minimum gas regardless of the estimate (default)
+    fallback_gas=300_000,  # used only if estimation itself fails, e.g. an RPC hiccup
+)
+```
+
 ### Gnosis Safe
 
 2-of-N multisig. Batches multiple calls into one atomic MultiSend transaction. No gnosis-py dependency required.
@@ -157,6 +186,26 @@ signer = GnosisSafeSigner(
     rpc_url="https://mainnet.base.org",
 )
 ```
+
+Gas is estimated dynamically here too, but batching makes it trickier: each call is simulated individually *from the Safe's own address* (matching the real MultiSend execution context) and summed. A call that depends on an earlier call in the same batch — the common case being `deposit()` needing the `approve()` before it to have landed — can't be estimated standalone, since nothing has actually been approved yet at simulation time. Rather than treat that as a real failure, a simulated allowance revert falls back to `fallback_call_gas`; every other simulated revert (a paused protocol, a deposit cap, a bad amount) is raised immediately, before anything is signed or broadcast:
+
+```python
+signer = GnosisSafeSigner(
+    safe_address="0x...",
+    signer1_key="0x...",
+    signer2_key="0x...",
+    rpc_url="https://mainnet.base.org",
+    gas_buffer=1.4,             # protocols with spiky gas costs need more headroom —
+                                #   e.g. MetaMorpho vaults that reallocate across
+                                #   multiple underlying markets on deposit
+    safe_overhead=150_000,      # fixed cost of execTransaction itself (default)
+    gas_floor=300_000,          # minimum gas regardless of the estimate (default)
+    fallback_call_gas=500_000,  # gas assumed for a call that can't be estimated
+                                #   standalone (raise this for expensive vaults)
+)
+```
+
+Both signers raise `RuntimeError` on a genuine on-chain revert, with `gas_used`, `gas_limit`, and `possible_oog` (gas used ≥ 95% of the limit) in the message — enough to tell an out-of-gas revert from any other failure without re-fetching the receipt yourself.
 
 ### Custom wallet
 

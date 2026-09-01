@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "defi-savings"
-version = "0.2.0"
+version = "0.3.0"
 description = "On-chain yield layer: deposit USDC into Aave, Morpho, or any ERC-4626 vault"
 readme = "README.md"
 requires-python = ">=3.11"

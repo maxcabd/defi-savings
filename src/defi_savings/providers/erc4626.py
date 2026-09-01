@@ -50,6 +50,7 @@ from decimal import Decimal
 
 from web3 import Web3
 
+from ..errors import VaultDepositCapExceededError
 from ..signers.base import Call, Signer
 from .base import YieldProvider
 
@@ -79,6 +80,11 @@ _VAULT_ABI = [
     {
         "name": "convertToAssets", "type": "function", "stateMutability": "view",
         "inputs":  [{"name": "shares", "type": "uint256"}],
+        "outputs": [{"type": "uint256"}],
+    },
+    {
+        "name": "maxDeposit", "type": "function", "stateMutability": "view",
+        "inputs":  [{"name": "receiver", "type": "address"}],
         "outputs": [{"type": "uint256"}],
     },
 ]
@@ -211,6 +217,12 @@ class Erc4626Provider(YieldProvider):
     def deposit(self, amount: Decimal) -> str:
         """Approve the vault then deposit assets — two calls in one Safe tx.
 
+        Checks ``maxDeposit()`` before building any transaction. ERC-4626's
+        ``deposit()`` checks this first internally too, before allowance or
+        balance — so an undersized cap always reverts regardless of gas, and
+        catching it here fails fast instead of burning gas on a guaranteed
+        revert. See :class:`~defi_savings.errors.VaultDepositCapExceededError`.
+
         Args:
             amount: Asset amount in human-readable units (e.g. ``Decimal("1000")``
                     for 1000 USDC).
@@ -221,6 +233,8 @@ class Erc4626Provider(YieldProvider):
         Raises:
             RuntimeError: If the signer's asset balance is insufficient, or if
                           the on-chain transaction reverts.
+            VaultDepositCapExceededError: If the vault's maxDeposit() for the
+                          signer's address is below the requested amount.
         """
         amount_raw = int(amount * 10 ** self._asset_decimals)
 
@@ -229,6 +243,13 @@ class Erc4626Provider(YieldProvider):
             have = Decimal(bal) / Decimal(10 ** self._asset_decimals)
             raise RuntimeError(
                 f"Asset balance too low: have {have:.6f}, need {amount:.6f}."
+            )
+
+        max_dep_raw = self.vault.functions.maxDeposit(self._signer.address).call()
+        if amount_raw > max_dep_raw:
+            max_dep = Decimal(max_dep_raw) / Decimal(10 ** self._asset_decimals)
+            raise VaultDepositCapExceededError(
+                requested=amount, max_deposit=max_dep, vault_address=self._vault_addr,
             )
 
         return self._signer.execute([

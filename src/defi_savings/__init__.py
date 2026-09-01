@@ -48,6 +48,7 @@ Custom wallet — implement one interface::
 """
 
 from .distribution import AccountSnapshot, distribute_yield
+from .errors import VaultDepositCapExceededError
 from .providers.base import YieldProvider
 from .rates import RatePool, fetch_rates
 from .scoring import ScoredPool, score_pools
@@ -63,6 +64,7 @@ __all__ = [
     "fetch_rates",
     "ScoredPool",
     "score_pools",
+    "VaultDepositCapExceededError",
 ]
 
 try:
