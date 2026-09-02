@@ -101,7 +101,15 @@ _ERC20_ABI = [
         "inputs":  [{"name": "account", "type": "address"}],
         "outputs": [{"type": "uint256"}],
     },
+    {
+        "name": "allowance", "type": "function", "stateMutability": "view",
+        "inputs":  [{"name": "owner", "type": "address"},
+                    {"name": "spender", "type": "address"}],
+        "outputs": [{"type": "uint256"}],
+    },
 ]
+
+_MAX_UINT256 = 2 ** 256 - 1
 
 
 class Erc4626Provider(YieldProvider):
@@ -215,16 +223,29 @@ class Erc4626Provider(YieldProvider):
         return self._apy_fn()
 
     def _deposit_calls(self, amount_raw: int) -> list[Call]:
-        return [
-            Call(
+        """Build the deposit call batch, skipping approve() when the vault
+        already holds sufficient allowance from a prior deposit.
+
+        Approves for ``_MAX_UINT256`` (not the exact amount) the first time,
+        so every subsequent deposit into this vault skips the approve call
+        entirely — the Safe's 2-of-2 multisig overhead is paid once per call
+        batch regardless of size, so cutting a redundant call out of a
+        repeat deposit is close to free.
+        """
+        calls: list[Call] = []
+        current_allowance = self.asset.functions.allowance(
+            self._signer.address, self._vault_addr
+        ).call()
+        if current_allowance < amount_raw:
+            calls.append(Call(
                 to   = self._asset_addr,
-                data = self.asset.encode_abi("approve", [self._vault_addr, amount_raw]),
-            ),
-            Call(
-                to   = self._vault_addr,
-                data = self.vault.encode_abi("deposit", [amount_raw, self._signer.address]),
-            ),
-        ]
+                data = self.asset.encode_abi("approve", [self._vault_addr, _MAX_UINT256]),
+            ))
+        calls.append(Call(
+            to   = self._vault_addr,
+            data = self.vault.encode_abi("deposit", [amount_raw, self._signer.address]),
+        ))
+        return calls
 
     def _withdraw_calls(self, amount_raw: int) -> list[Call]:
         return [

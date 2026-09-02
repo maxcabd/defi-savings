@@ -51,7 +51,9 @@ class FakeSigner:
         return self.estimate_return
 
 
-def _make_provider(*, balance_raw: int, max_deposit_raw: int) -> tuple[Erc4626Provider, FakeSigner]:
+def _make_provider(
+    *, balance_raw: int, max_deposit_raw: int, allowance_raw: int = 0
+) -> tuple[Erc4626Provider, FakeSigner]:
     fake_w3 = MagicMock()
 
     vault_contract = MagicMock()
@@ -59,6 +61,7 @@ def _make_provider(*, balance_raw: int, max_deposit_raw: int) -> tuple[Erc4626Pr
 
     asset_contract = MagicMock()
     asset_contract.functions.balanceOf.return_value.call.return_value = balance_raw
+    asset_contract.functions.allowance.return_value.call.return_value = allowance_raw
 
     def _contract(address, abi):
         # Erc4626Provider.__init__ builds the vault contract first (ABI
@@ -173,6 +176,41 @@ def test_estimate_deposit_cost_still_enforces_balance_check():
         provider.estimate_deposit_cost(Decimal("1000"))
 
     assert signer.estimated_calls == []
+
+
+# ── allowance-aware approve skipping ─────────────────────────────────────────
+
+def test_deposit_with_zero_allowance_includes_approve_call():
+    provider, signer = _make_provider(
+        balance_raw=2_000_000_000, max_deposit_raw=5_000_000_000, allowance_raw=0,
+    )
+
+    provider.deposit(Decimal("1000"))
+
+    assert len(signer.executed_calls[0]) == 2  # approve + deposit
+
+
+def test_deposit_with_sufficient_allowance_skips_approve_call():
+    provider, signer = _make_provider(
+        balance_raw=2_000_000_000, max_deposit_raw=5_000_000_000,
+        allowance_raw=1_000_000_000,  # exactly the 1000 USDC being deposited
+    )
+
+    provider.deposit(Decimal("1000"))
+
+    assert len(signer.executed_calls[0]) == 1  # deposit only, approve skipped
+    assert signer.executed_calls[0][0].to == provider._vault_addr
+
+
+def test_deposit_with_insufficient_allowance_reapproves():
+    provider, signer = _make_provider(
+        balance_raw=2_000_000_000, max_deposit_raw=5_000_000_000,
+        allowance_raw=500_000_000,  # less than the 1000 USDC being deposited
+    )
+
+    provider.deposit(Decimal("1000"))
+
+    assert len(signer.executed_calls[0]) == 2
 
 
 def test_estimate_withdraw_cost_delegates_to_signer_without_executing():

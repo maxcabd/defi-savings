@@ -57,7 +57,12 @@ ERC20_ABI = [
     {"name": "balanceOf", "type": "function", "stateMutability": "view",
      "inputs": [{"name": "account", "type": "address"}],
      "outputs": [{"type": "uint256"}]},
+    {"name": "allowance", "type": "function", "stateMutability": "view",
+     "inputs": [{"name": "owner", "type": "address"}, {"name": "spender", "type": "address"}],
+     "outputs": [{"type": "uint256"}]},
 ]
+
+_MAX_UINT256 = 2 ** 256 - 1
 
 
 class AaveProvider(YieldProvider):
@@ -106,16 +111,23 @@ class AaveProvider(YieldProvider):
         return Decimal(raw) / Decimal(10 ** USDC_DECIMALS)
 
     def _deposit_calls(self, amount_raw: int) -> list[Call]:
-        return [
-            Call(
+        """Build the deposit call batch, skipping approve() when the Pool
+        already holds sufficient allowance from a prior deposit (approves
+        for ``_MAX_UINT256`` the first time so later deposits skip it)."""
+        calls: list[Call] = []
+        current_allowance = self.usdc.functions.allowance(
+            self._signer.address, AAVE_POOL_ADDRESS
+        ).call()
+        if current_allowance < amount_raw:
+            calls.append(Call(
                 to   = USDC_ADDRESS,
-                data = self.usdc.encode_abi("approve", [AAVE_POOL_ADDRESS, amount_raw]),
-            ),
-            Call(
-                to   = AAVE_POOL_ADDRESS,
-                data = self.pool.encode_abi("supply", [USDC_ADDRESS, amount_raw, self._signer.address, 0]),
-            ),
-        ]
+                data = self.usdc.encode_abi("approve", [AAVE_POOL_ADDRESS, _MAX_UINT256]),
+            ))
+        calls.append(Call(
+            to   = AAVE_POOL_ADDRESS,
+            data = self.pool.encode_abi("supply", [USDC_ADDRESS, amount_raw, self._signer.address, 0]),
+        ))
+        return calls
 
     def _withdraw_calls(self, amount_raw: int) -> list[Call]:
         return [
