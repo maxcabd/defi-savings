@@ -48,6 +48,7 @@ Custom wallet — implement one interface::
 """
 
 from .distribution import AccountSnapshot, distribute_yield
+from .erc20 import approve_if_needed
 from .errors import VaultDepositCapExceededError
 from .providers.base import YieldProvider
 from .rates import RatePool, fetch_rates
@@ -70,6 +71,7 @@ __all__ = [
     "fetch_stability",
     "fetch_stability_scores",
     "VaultDepositCapExceededError",
+    "approve_if_needed",
 ]
 
 try:

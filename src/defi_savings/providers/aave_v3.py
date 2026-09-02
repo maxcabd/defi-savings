@@ -9,6 +9,7 @@ from decimal import Decimal
 
 from web3 import Web3
 
+from ..erc20 import approve_if_needed
 from ..signers.base import Call, GasEstimate, Signer
 from .base import YieldProvider
 
@@ -62,8 +63,6 @@ ERC20_ABI = [
      "outputs": [{"type": "uint256"}]},
 ]
 
-_MAX_UINT256 = 2 ** 256 - 1
-
 
 class AaveProvider(YieldProvider):
     """
@@ -112,17 +111,11 @@ class AaveProvider(YieldProvider):
 
     def _deposit_calls(self, amount_raw: int) -> list[Call]:
         """Build the deposit call batch, skipping approve() when the Pool
-        already holds sufficient allowance from a prior deposit (approves
-        for ``_MAX_UINT256`` the first time so later deposits skip it)."""
-        calls: list[Call] = []
-        current_allowance = self.usdc.functions.allowance(
-            self._signer.address, AAVE_POOL_ADDRESS
-        ).call()
-        if current_allowance < amount_raw:
-            calls.append(Call(
-                to   = USDC_ADDRESS,
-                data = self.usdc.encode_abi("approve", [AAVE_POOL_ADDRESS, _MAX_UINT256]),
-            ))
+        already holds sufficient allowance from a prior deposit — see
+        :func:`defi_savings.erc20.approve_if_needed`."""
+        calls = approve_if_needed(
+            self.usdc, USDC_ADDRESS, self._signer.address, AAVE_POOL_ADDRESS, amount_raw,
+        )
         calls.append(Call(
             to   = AAVE_POOL_ADDRESS,
             data = self.pool.encode_abi("supply", [USDC_ADDRESS, amount_raw, self._signer.address, 0]),

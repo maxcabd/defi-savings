@@ -7,7 +7,7 @@ Centralizing it here means the allowance-skip behavior — and any future
 tweak to it — only has to be written once.
 """
 
-from ..signers.base import Call
+from .signers.base import Call
 
 _MAX_UINT256 = 2 ** 256 - 1
 
